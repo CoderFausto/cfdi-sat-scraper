@@ -26,16 +26,19 @@ use PhpCfdi\CfdiSatScraper\QueryByUuid;
  * Has a copy of callable to raise when limit is reached
  *
  * @see QueryResolver
+ *
  * @internal
  */
 class MetadataDownloader
 {
+    /** @var int Maximum amount of records that SAT returns on a single query -*/
+    public const RECORDS_LIMIT = 500;
+
     /** @internal */
     public function __construct(
         private readonly QueryResolver $queryResolver,
         private readonly MetadataMessageHandler $messageHandler,
-    ) {
-    }
+    ) {}
 
     public function getQueryResolver(): QueryResolver
     {
@@ -48,7 +51,8 @@ class MetadataDownloader
     }
 
     /**
-     * @param string[] $uuids
+     * @param  string[]  $uuids
+     *
      * @throws SatHttpGatewayException
      */
     public function downloadByUuids(array $uuids, DownloadType $downloadType): MetadataList
@@ -69,6 +73,7 @@ class MetadataDownloader
     public function downloadByUuid(UuidOption $uuid, DownloadType $downloadType): MetadataList
     {
         $query = new QueryByUuid($uuid, $downloadType);
+
         return $this->resolveQuery($query);
     }
 
@@ -84,6 +89,7 @@ class MetadataDownloader
 
         $query = clone $query;
         $query->setPeriod($startDate, $endDate);
+
         return $this->downloadByDateTime($query);
     }
 
@@ -92,13 +98,65 @@ class MetadataDownloader
      */
     public function downloadByDateTime(QueryByFilters $query): MetadataList
     {
-        $result = new MetadataList([]);
-        foreach ($this->splitQueryByFiltersByDays($query) as $current) {
-            $list = $this->downloadQuery($current);
-            $this->messageHandler->date($current->getStartDate(), $current->getEndDate(), $list->count());
-            $result = $result->merge($list);
+        // SAT only allows to set a final date on "emitidos" queries, the "recibidos" form
+        // has a single date and a range of hours, therefore it must be queried day by day
+        if (! $query->getDownloadType()->isEmitidos()) {
+            $result = new MetadataList([]);
+            foreach ($this->splitQueryByFiltersByDays($query) as $current) {
+                $list = $this->downloadQuery($current);
+                $this->messageHandler->date($current->getStartDate(), $current->getEndDate(), $list->count());
+                $result = $result->merge($list);
+            }
+
+            return $result;
         }
-        return $result;
+
+        return $this->downloadPeriod($query, $query->getStartDate(), $query->getEndDate());
+    }
+
+    /**
+     * Resolve a period, when the records limit is reached the period is divided by days until
+     * it can be resolved or until it is contained on a single day, then it is resolved by seconds.
+     *
+     * @throws SatHttpGatewayException
+     *
+     * @see MetadataDownloader::downloadQuery()
+     */
+    private function downloadPeriod(QueryByFilters $query, DateTimeImmutable $since, DateTimeImmutable $until): MetadataList
+    {
+        if ($since->format('Y-m-d') === $until->format('Y-m-d')) {
+            $list = $this->downloadQuery((clone $query)->setPeriod($since, $until));
+            $this->messageHandler->date($since, $until, $list->count());
+
+            return $list;
+        }
+
+        $list = $this->resolveQuery((clone $query)->setPeriod($since, $until));
+        if ($list->count() < self::RECORDS_LIMIT) {
+            $this->messageHandler->resolved($since, $until, $list->count());
+            $this->messageHandler->date($since, $until, $list->count());
+
+            return $list;
+        }
+
+        $this->messageHandler->divide($since, $until);
+        $middle = $this->lastMomentOfMiddleDay($since, $until);
+
+        return $this->downloadPeriod($query, $since, $middle)
+            ->merge($this->downloadPeriod($query, $middle->modify('midnight +1 day'), $until));
+    }
+
+    /**
+     * Return the last second of the day where a period that spans several days must be divided
+     */
+    private function lastMomentOfMiddleDay(DateTimeImmutable $since, DateTimeImmutable $until): DateTimeImmutable
+    {
+        $firstDay = $since->modify('midnight');
+        $days = intval($firstDay->diff($until->modify('midnight'))->days);
+        /** @var DateTimeImmutable $middle set this type definition as setTime can return FALSE */
+        $middle = $firstDay->modify(sprintf('+%d days', intdiv($days, 2)))->setTime(23, 59, 59);
+
+        return $middle;
     }
 
     /**
@@ -111,31 +169,34 @@ class MetadataDownloader
         $lowerBound = intval($query->getStartDate()->format('U')) - intval($day->format('U'));
         $upperBound = intval($query->getEndDate()->format('U')) - intval($day->format('U'));
         $secondInitial = $lowerBound;
-        $secondEnd = $upperBound;
+        $maximumWindow = $upperBound - $lowerBound + 1;
+        $window = $maximumWindow;
 
-        while (true) {
+        while ($secondInitial <= $upperBound) {
+            $secondEnd = min($secondInitial + $window - 1, $upperBound);
             $currentQuery = $this->newQueryWithSeconds($query, $secondInitial, $secondEnd);
             $list = $this->resolveQuery($currentQuery);
             $result = $list->count();
 
-            if ($result >= 500 && $secondEnd === $secondInitial) {
-                $this->messageHandler->maximum($currentQuery->getStartDate());
-            }
-
-            if ($result >= 500 && $secondEnd > $secondInitial) {
+            if ($result >= self::RECORDS_LIMIT && $secondEnd > $secondInitial) {
                 $this->messageHandler->divide($currentQuery->getStartDate(), $currentQuery->getEndDate());
-                $secondEnd = (int) floor($secondInitial + (($secondEnd - $secondInitial) / 2));
+                $window = intdiv($secondEnd - $secondInitial, 2) + 1;
+
                 continue;
             }
 
-            $this->messageHandler->resolved($currentQuery->getStartDate(), $currentQuery->getEndDate(), $list->count());
-            $finalList = $finalList->merge($list);
-            if ($secondEnd >= $upperBound) {
-                break;
+            if ($result >= self::RECORDS_LIMIT) {
+                $this->messageHandler->maximum($currentQuery->getStartDate());
             }
 
+            $this->messageHandler->resolved($currentQuery->getStartDate(), $currentQuery->getEndDate(), $result);
+            $finalList = $finalList->merge($list);
             $secondInitial = $secondEnd + 1;
-            $secondEnd = $upperBound;
+
+            // the window worked and there is room to spare, try with a bigger window on the next segment
+            if (2 * $result < self::RECORDS_LIMIT) {
+                $window = min(2 * $window, $maximumWindow);
+            }
         }
 
         return $finalList;
@@ -151,11 +212,13 @@ class MetadataDownloader
 
     /**
      * @throws SatHttpGatewayException
+     *
      * @see QueryResolver
      */
     public function resolveQuery(QueryInterface $query): MetadataList
     {
         $inputs = $this->createInputsFromQuery($query);
+
         return $this->getQueryResolver()->resolve($inputs);
     }
 
@@ -170,6 +233,7 @@ class MetadataDownloader
             if ($query->getDownloadType()->isEmitidos()) {
                 return new InputsByFiltersIssued($query);
             }
+
             return new InputsByFiltersReceived($query);
         }
         if ($query instanceof QueryByUuid) {
