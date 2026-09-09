@@ -34,6 +34,9 @@ class MetadataDownloader
     /** @var int Maximum amount of records that SAT returns on a single query -*/
     public const RECORDS_LIMIT = 500;
 
+    /** @var int Maximum amount of months that SAT allows on a single query period */
+    public const MAX_PERIOD_MONTHS = 12;
+
     /** @internal */
     public function __construct(
         private readonly QueryResolver $queryResolver,
@@ -98,6 +101,17 @@ class MetadataDownloader
      */
     public function downloadByDateTime(QueryByFilters $query): MetadataList
     {
+        // SAT limits a single query to a period of maximum 12 months, split it into chunks
+        // when the requested period exceeds that limit
+        if ($this->exceedsMaximumPeriod($query)) {
+            $result = new MetadataList([]);
+            foreach ($this->splitQueryByFiltersByMonths($query) as $current) {
+                $result = $result->merge($this->downloadByDateTime($current));
+            }
+
+            return $result;
+        }
+
         // SAT only allows to set a final date on "emitidos" queries, the "recibidos" form
         // has a single date and a range of hours, therefore it must be queried day by day
         if (! $query->getDownloadType()->isEmitidos()) {
@@ -255,6 +269,34 @@ class MetadataDownloader
             /** @var DateTimeImmutable $dateOnLastSecond set this type definition as setTime can return FALSE */
             $dateOnLastSecond = $date->setTime(23, 59, 59);
             $partial->setPeriod($date, min($dateOnLastSecond, $endDate));
+            yield $partial;
+        }
+    }
+
+    /**
+     * Check if the query period exceeds the maximum amount of months allowed by SAT
+     */
+    public function exceedsMaximumPeriod(QueryByFilters $query): bool
+    {
+        return $query->getStartDate()->modify('+1 year -1 second') < $query->getEndDate();
+    }
+
+    /**
+     * Generates a clone of this query split in periods of at most MAX_PERIOD_MONTHS months.
+     * The SAT portal rejects a single query that spans more than 12 months.
+     *
+     * @return Generator<QueryByFilters>
+     */
+    public function splitQueryByFiltersByMonths(QueryByFilters $query): Generator
+    {
+        $endDate = $query->getEndDate();
+        for (
+            $date = $query->getStartDate();
+            $date <= $endDate;
+            $date = $date->modify('+1 year')
+        ) {
+            $partial = clone $query;
+            $partial->setPeriod($date, min($date->modify('+1 year -1 second'), $endDate));
             yield $partial;
         }
     }

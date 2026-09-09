@@ -269,6 +269,117 @@ final class MetadataDownloaderTest extends TestCase
         $this->assertEquals($expected, $split);
     }
 
+    public function testExceedsMaximumPeriod(): void
+    {
+        $downloader = new MetadataDownloader(
+            $this->createMock(QueryResolver::class),
+            $this->createMock(MetadataMessageHandler::class),
+        );
+
+        $withinLimit = new QueryByFilters(
+            new DateTimeImmutable('2019-01-13 00:00:00'),
+            new DateTimeImmutable('2020-01-12 23:59:59'),
+        );
+        $this->assertFalse($downloader->exceedsMaximumPeriod($withinLimit));
+
+        $overLimit = new QueryByFilters(
+            new DateTimeImmutable('2019-01-13 00:00:00'),
+            new DateTimeImmutable('2020-01-13 00:00:00'),
+        );
+        $this->assertTrue($downloader->exceedsMaximumPeriod($overLimit));
+    }
+
+    public function testSplitByMonths(): void
+    {
+        $lowerBound = new DateTimeImmutable('2019-01-13 14:15:16');
+        $upperBound = new DateTimeImmutable('2021-05-20 18:19:20');
+        $query = new QueryByFilters($lowerBound, $upperBound);
+        $metadata = new MetadataDownloader(
+            $this->createMock(QueryResolver::class),
+            $this->createMock(MetadataMessageHandler::class),
+        );
+
+        $split = [];
+        foreach ($metadata->splitQueryByFiltersByMonths($query) as $current) {
+            $split[] = [
+                'begin' => $current->getStartDate(),
+                'end' => $current->getEndDate(),
+            ];
+        }
+
+        $expected = [
+            ['begin' => $lowerBound, 'end' => new DateTimeImmutable('2020-01-13 14:15:15')],
+            ['begin' => new DateTimeImmutable('2020-01-13 14:15:16'), 'end' => new DateTimeImmutable('2021-01-13 14:15:15')],
+            ['begin' => new DateTimeImmutable('2021-01-13 14:15:16'), 'end' => $upperBound],
+        ];
+
+        $this->assertEquals($expected, $split);
+    }
+
+    public function testSplitByMonthsPreserveOtherFilters(): void
+    {
+        $downloadType = DownloadType::emitidos();
+        $complement = ComplementsOption::comercioExterior11();
+        $stateVoucher = StatesVoucherOption::cancelados();
+
+        $lowerBound = new DateTimeImmutable('2019-01-13 14:15:16');
+        $upperBound = new DateTimeImmutable('2021-05-20 18:19:20');
+        $query = new Query($lowerBound, $upperBound);
+        $query->setDownloadType($downloadType);
+        $query->setComplement($complement);
+        $query->setStateVoucher($stateVoucher);
+        $metadata = new MetadataDownloader(
+            $this->createMock(QueryResolver::class),
+            $this->createMock(MetadataMessageHandler::class),
+        );
+
+        foreach ($metadata->splitQueryByFiltersByMonths($query) as $current) {
+            $this->assertEquals($downloadType, $current->getDownloadType());
+            $this->assertEquals($complement, $current->getComplement());
+            $this->assertEquals($stateVoucher, $current->getStateVoucher());
+        }
+    }
+
+    public function testDownloadByDateTimeSplitsPeriodLongerThanOneYear(): void
+    {
+        $resolver = new FakeQueryResolver();
+        $handler = $this->createMock(MetadataMessageHandler::class);
+        $downloader = new MetadataDownloader($resolver, $handler);
+
+        $start = new DateTimeImmutable('2019-01-13 00:00:00');
+        $end = new DateTimeImmutable('2021-05-20 23:59:59');
+        $query = new QueryByFilters($start, $end);
+
+        $downloader->downloadByDateTime($query);
+
+        // emitidos: each 12-months chunk is resolved by downloadPeriod without further split
+        $this->assertSame([
+            ['start' => '2019-01-13 00:00:00', 'end' => '2020-01-12 23:59:59', 'count' => 0],
+            ['start' => '2020-01-13 00:00:00', 'end' => '2021-01-12 23:59:59', 'count' => 0],
+            ['start' => '2021-01-13 00:00:00', 'end' => '2021-05-20 23:59:59', 'count' => 0],
+        ], $resolver->resolveCalls);
+    }
+
+    public function testDownloadByDateSplitsPeriodLongerThanOneYear(): void
+    {
+        $resolver = new FakeQueryResolver();
+        $handler = $this->createMock(MetadataMessageHandler::class);
+        $downloader = new MetadataDownloader($resolver, $handler);
+
+        $start = new DateTimeImmutable('2019-01-13 14:15:16');
+        $end = new DateTimeImmutable('2021-05-20 18:19:20');
+        $query = new QueryByFilters($start, $end);
+
+        $downloader->downloadByDate($query);
+
+        // downloadByDate normalizes times to 00:00:00 / 23:59:59 before splitting
+        $this->assertSame([
+            ['start' => '2019-01-13 00:00:00', 'end' => '2020-01-12 23:59:59', 'count' => 0],
+            ['start' => '2020-01-13 00:00:00', 'end' => '2021-01-12 23:59:59', 'count' => 0],
+            ['start' => '2021-01-13 00:00:00', 'end' => '2021-05-20 23:59:59', 'count' => 0],
+        ], $resolver->resolveCalls);
+    }
+
     public function testSplitByDaysPreserveOtherFilters(): void
     {
         // these options are not the default
