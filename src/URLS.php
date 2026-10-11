@@ -15,6 +15,18 @@ final class URLS
     /** @var string The page to search for issued */
     public const PORTAL_CFDI_CONSULTA_EMISOR = 'https://portalcfdi.facturaelectronica.sat.gob.mx/ConsultaEmisor.aspx';
 
+    /**
+     * @var string The endpoint (issued) to validate if the daily download quota is available.
+     * The SAT portal allows a maximum of 2,000 documents per day.
+     */
+    public const PORTAL_CFDI_VALIDATE_DOWNLOAD_EMISOR = self::PORTAL_CFDI_CONSULTA_EMISOR . '/ValidarDescarga';
+
+    /**
+     * @var string The endpoint (received) to validate if the daily download quota is available.
+     * The SAT portal allows a maximum of 2,000 documents per day.
+     */
+    public const PORTAL_CFDI_VALIDATE_DOWNLOAD_RECEPTOR = self::PORTAL_CFDI_CONSULTA_RECEPTOR . '/ValidarDescarga';
+
     /** @var string The page to log out */
     public const PORTAL_CFDI_LOGOUT = 'https://portalcfdi.facturaelectronica.sat.gob.mx/logout.aspx';
 
