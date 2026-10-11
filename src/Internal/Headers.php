@@ -58,4 +58,21 @@ class Headers
             'X-Requested-With' => 'XMLHttpRequest',
         ]);
     }
+
+    /**
+     * Return the headers to use on ajax requests that send a JSON body
+     *
+     *
+     * @return array<string, string>
+     */
+    public static function postAjaxJson(string $host, string $referer): array
+    {
+        return array_merge(self::get($referer), array_filter([
+            'Pragma' => 'no-cache',
+            'Host' => $host,
+            'Accept' => 'application/json, text/javascript, */*; q=0.01',
+            'Content-Type' => 'application/json; charset=utf-8',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ]));
+    }
 }

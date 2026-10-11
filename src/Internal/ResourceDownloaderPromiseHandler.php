@@ -8,6 +8,7 @@ use finfo;
 use GuzzleHttp\Exception\RequestException;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceDownloaderPromiseHandlerInterface;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceDownloadHandlerInterface;
+use PhpCfdi\CfdiSatScraper\Exceptions\DailyDownloadLimitException;
 use PhpCfdi\CfdiSatScraper\Exceptions\ResourceDownloadError;
 use PhpCfdi\CfdiSatScraper\Exceptions\ResourceDownloadRequestExceptionError;
 use PhpCfdi\CfdiSatScraper\Exceptions\ResourceDownloadResponseError;
@@ -40,6 +41,9 @@ final class ResourceDownloaderPromiseHandler implements ResourceDownloaderPromis
         try {
             $content = $this->validateResponse($response, $uuid);
             $this->handler->onSuccess($uuid, $content, $response);
+        } catch (DailyDownloadLimitException $exception) {
+            // The portal reported the daily download limit, stop the whole download process.
+            throw $exception;
         } catch (ResourceDownloadResponseError $exception) {
             $this->handlerError($exception);
             return;
@@ -72,11 +76,19 @@ final class ResourceDownloaderPromiseHandler implements ResourceDownloaderPromis
 
         if ($this->resourceType->fileTypeIsXml()) {
             if (false === stripos($content, 'UUID="')) {
+                $limitException = DailyDownloadLimitException::fromPortalResponse($content);
+                if (null !== $limitException) {
+                    throw $limitException;
+                }
                 throw ResourceDownloadResponseError::contentIsNotCfdi($response, $uuid);
             }
         } elseif ($this->resourceType->fileTypeIsPdf()) {
             $mimeType = strtolower((new finfo())->buffer($content, FILEINFO_MIME_TYPE) ?: '');
             if ('application/pdf' !== $mimeType) {
+                $limitException = DailyDownloadLimitException::fromPortalResponse($content);
+                if (null !== $limitException) {
+                    throw $limitException;
+                }
                 throw ResourceDownloadResponseError::contentIsNotPdf($response, $uuid, $mimeType);
             }
         }

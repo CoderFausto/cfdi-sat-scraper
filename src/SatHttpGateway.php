@@ -112,6 +112,21 @@ class SatHttpGateway
     }
 
     /**
+     * Ask the portal if there is enough daily download quota for the given amount of documents.
+     *
+     * The portal enforces a maximum of 2,000 documents per day. It answers with a JSON document
+     * containing a `RespuestaValidaDescarga` object. The interpretation of that response is done
+     * by {@see \PhpCfdi\CfdiSatScraper\Exceptions\DailyDownloadLimitException::fromPortalResponse()}.
+     *
+     * @throws SatHttpGatewayException
+     */
+    public function postValidateDownload(string $url, int $count): string
+    {
+        $headers = Headers::postAjaxJson($this->urlHost(URLS::PORTAL_CFDI), $url);
+        return $this->postJson('validate daily download quota', $url, $headers, sprintf('{ id: %d }', $count));
+    }
+
+    /**
      * Create a promise (asynchronous request) to perform an XML download.
      */
     public function getAsync(string $link): PromiseInterface
@@ -159,6 +174,21 @@ class SatHttpGateway
         $options = [
             RequestOptions::HEADERS => $headers,
             RequestOptions::FORM_PARAMS => $data,
+        ];
+        return $this->request('POST', $url, $options, $reason);
+    }
+
+    /**
+     * Helper to make a POST request with a raw (JSON) body
+     *
+     * @param array<string, mixed> $headers
+     * @throws SatHttpGatewayException
+     */
+    private function postJson(string $reason, string $url, array $headers, string $body): string
+    {
+        $options = [
+            RequestOptions::HEADERS => $headers,
+            RequestOptions::BODY => $body,
         ];
         return $this->request('POST', $url, $options, $reason);
     }

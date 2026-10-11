@@ -9,9 +9,11 @@ use GuzzleHttp\Promise\PromiseInterface;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceDownloaderPromiseHandlerInterface;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceDownloadHandlerInterface;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceFileNamerInterface;
+use PhpCfdi\CfdiSatScraper\Exceptions\DailyDownloadLimitException;
 use PhpCfdi\CfdiSatScraper\Exceptions\InvalidArgumentException;
 use PhpCfdi\CfdiSatScraper\Exceptions\LogicException;
 use PhpCfdi\CfdiSatScraper\Exceptions\RuntimeException;
+use PhpCfdi\CfdiSatScraper\Exceptions\SatHttpGatewayException;
 use PhpCfdi\CfdiSatScraper\Internal\ResourceDownloaderPromiseHandler;
 use PhpCfdi\CfdiSatScraper\Internal\ResourceDownloadStoreInFolder;
 use PhpCfdi\CfdiSatScraper\Internal\ResourceFileNamerByType;
@@ -38,15 +40,19 @@ class ResourceDownloader
 
     private ResourceFileNamerInterface $resourceFileNamer;
 
+    private string $validateDownloadUrl;
+
     public function __construct(
         private readonly SatHttpGateway $satHttpGateway,
         private readonly ResourceType $resourceType,
         protected ?MetadataList $list = null,
         int $concurrency = self::DEFAULT_CONCURRENCY,
         ?ResourceFileNamerInterface $resourceFileNamer = null,
+        ?string $validateDownloadUrl = null,
     ) {
         $this->setConcurrency($concurrency);
         $this->setResourceFileNamer($resourceFileNamer ?? new ResourceFileNamerByType($this->resourceType));
+        $this->validateDownloadUrl = $validateDownloadUrl ?? URLS::PORTAL_CFDI_VALIDATE_DOWNLOAD_EMISOR;
     }
 
     public function getResourceType(): ResourceType
@@ -111,6 +117,59 @@ class ResourceDownloader
     }
 
     /**
+     * The portal endpoint used to validate the daily download quota (2,000 documents per day)
+     */
+    public function getValidateDownloadUrl(): string
+    {
+        return $this->validateDownloadUrl;
+    }
+
+    /**
+     * Set up the portal endpoint used to validate the daily download quota.
+     * Use {@see URLS::PORTAL_CFDI_VALIDATE_DOWNLOAD_EMISOR} or {@see URLS::PORTAL_CFDI_VALIDATE_DOWNLOAD_RECEPTOR}.
+     *
+     * @return $this
+     */
+    public function setValidateDownloadUrl(string $validateDownloadUrl): self
+    {
+        $this->validateDownloadUrl = $validateDownloadUrl;
+        return $this;
+    }
+
+    /**
+     * Inspect the portal response to know if the amount of documents to download is allowed
+     * by the daily quota (a maximum of 2,000 documents per day).
+     *
+     * When the portal reports that the limit was reached, this method throws the exception.
+     * When the quota can not be verified (network or parsing issue), it lets the download continue
+     * and relies on the response validation performed on each downloaded document.
+     *
+     * @throws DailyDownloadLimitException
+     */
+    public function validateDailyDownloadQuota(): void
+    {
+        if (! $this->resourceType->isXml() && ! $this->resourceType->isPdf()) {
+            return;
+        }
+
+        $count = $this->getMetadataList()->filterWithResourceLink($this->resourceType)->count();
+        if ($count < 1) {
+            return;
+        }
+
+        try {
+            $response = $this->satHttpGateway->postValidateDownload($this->validateDownloadUrl, $count);
+        } catch (SatHttpGatewayException) {
+            return;
+        }
+
+        $limitException = DailyDownloadLimitException::fromPortalResponse($response);
+        if (null !== $limitException) {
+            throw $limitException;
+        }
+    }
+
+    /**
      * Generate the promises to download all the elements on the metadata list that contains
      * a link to download the CFDI.
      *
@@ -122,11 +181,15 @@ class ResourceDownloader
      *
      * @return string[]
      *
+     * @throws DailyDownloadLimitException when the SAT portal reports that the daily download limit was reached
+     *
      * @see ResourceDownloaderPromiseHandler::promiseFulfilled()
      * @see ResourceDownloaderPromiseHandler::promiseRejected()
      */
     public function download(ResourceDownloadHandlerInterface $handler): array
     {
+        // fail fast when the portal reports that the daily download quota was reached
+        $this->validateDailyDownloadQuota();
         // wrap the provided handler into the main handler, to throw the expected exceptions
         $promisesHandler = $this->makePromiseHandler($handler);
         // create the promises iterator
