@@ -8,6 +8,7 @@ use Exception;
 use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Psr7\Response;
 use PhpCfdi\CfdiSatScraper\Contracts\ResourceDownloadHandlerInterface;
+use PhpCfdi\CfdiSatScraper\Exceptions\DailyDownloadLimitException;
 use PhpCfdi\CfdiSatScraper\Exceptions\ResourceDownloadResponseError;
 use PhpCfdi\CfdiSatScraper\Internal\ResourceDownloaderPromiseHandler;
 use PhpCfdi\CfdiSatScraper\ResourceType;
@@ -110,6 +111,48 @@ final class ResourceDownloaderPromiseHandlerTest extends TestCase
         $handler->promiseFulfilled($response, $uuid);
 
         $this->assertSame($uuid, $resourceDownloadHandler->lastError->getUuid());
+    }
+
+    public function testValidateResponseThrowsDailyDownloadLimitExceptionFromHtml(): void
+    {
+        $resourceDownloadHandler = $this->createMock(ResourceDownloadHandlerInterface::class);
+        $handler = new ResourceDownloaderPromiseHandler(ResourceType::xml(), $resourceDownloadHandler);
+        $uuid = 'b01017a7-e1b8-4a25-9e31-85ab56526f54';
+        $body = '<html><body>Por seguridad únicamente se permite descargar un máximo de 2,000 archivos por día.</body></html>';
+        $response = new Response(200, body: $body);
+
+        $this->expectException(DailyDownloadLimitException::class);
+        $handler->validateResponse($response, $uuid);
+    }
+
+    public function testValidateResponseThrowsDailyDownloadLimitExceptionFromJson(): void
+    {
+        $resourceDownloadHandler = $this->createMock(ResourceDownloadHandlerInterface::class);
+        $handler = new ResourceDownloaderPromiseHandler(ResourceType::xml(), $resourceDownloadHandler);
+        $uuid = 'b01017a7-e1b8-4a25-9e31-85ab56526f54';
+        $body = '{"d":{"__type":"Sat.Cfdi.Iu.Contribuyente.Portal.RespuestaValidaDescarga","Codigo":2,'
+            . '"CantidadDisponible":0,"CantidadTope":2000,"Mensaje":"Ya no puedes descargar más documentos."}}';
+        $response = new Response(200, body: $body);
+
+        $this->expectException(DailyDownloadLimitException::class);
+        $handler->validateResponse($response, $uuid);
+    }
+
+    public function testPromiseFullfilledWithDailyDownloadLimitExceptionIsNotRoutedToHandler(): void
+    {
+        $resourceDownloadHandler = new ResourceDownloadHandlerSpy();
+        $handler = new ResourceDownloaderPromiseHandler(ResourceType::xml(), $resourceDownloadHandler);
+        $uuid = 'b01017a7-e1b8-4a25-9e31-85ab56526f54';
+        $body = '<html><body>Por seguridad únicamente se permite descargar un máximo de 2,000 archivos por día.</body></html>';
+        $response = new Response(200, body: $body);
+
+        try {
+            $handler->promiseFulfilled($response, $uuid);
+            $this->fail('promiseFulfilled should have thrown a DailyDownloadLimitException');
+        } catch (DailyDownloadLimitException) {
+            $this->assertFalse(isset($resourceDownloadHandler->lastError));
+            $this->assertSame([], $handler->downloadedUuids());
+        }
     }
 
     public function testPromiseFullfilledWithException(): void
